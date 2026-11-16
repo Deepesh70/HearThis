@@ -12,7 +12,7 @@ HearThis is a production-grade native Windows desktop audio identification syste
   - DSP & Serialization: Channel-aware downmixing, 80 Hz IIR high-pass filter, bounded peak normalization, and in-memory RIFF WAV generation
   - Network Client: Windows HTTP Services (`winhttp.dll` / TLS 1.2+ connection reuse)
   - Cryptography: Windows Cryptography Next Generation (`bcrypt.dll` for HMAC-SHA1, `crypt32.dll` for Base64)
-  - GUI Framework: Native Win32 API with Immersive Dark Mode (`dwmapi.dll` / `user32.dll` / `gdi32.dll` / `comctl32.dll`)
+  - GUI Framework: Native Win32 API with Dynamic Dual-Theme Engine (Immersive Dark Mode and Light Theme with dynamic GDI brush swap via `dwmapi.dll` / `user32.dll` / `gdi32.dll` / `comctl32.dll`)
   - Local Configuration: Flat-key persistence at `%APPDATA%/HearThis/config.txt` (with backward-compatible migration from `%APPDATA%/SongDetector/native_config.txt`)
 
 ---

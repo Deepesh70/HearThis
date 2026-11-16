@@ -81,7 +81,12 @@ Network communication and cryptographic signing are implemented strictly through
 - **Cryptographic Encoding (`crypt32.dll`)**: Converts binary cryptographic digests to URL-safe Base64 strings via `CryptBinaryToStringA(CRYPT_STRING_BASE64 | CRYPT_STRING_NOCRLF)`.
 
 ### 2.4 Native Win32 UI & Configuration (`main.cpp`)
-- **Native Win32 Controls**: Built with raw `CreateWindowExW`, standard Win32 edit boxes, buttons, drop-down combo boxes, and `Segoe UI` typography.
-- **Desktop Window Manager (`dwmapi.dll`)**: Activates Windows 11 immersive dark mode title bars via `DwmSetWindowAttribute(hwnd, DWMWA_USE_IMMERSIVE_DARK_MODE, &enable, sizeof(enable))`.
-- **Asynchronous Execution**: UI events trigger background worker threads (`std::thread`), leaving the message pump (`GetMessage`/`DispatchMessage`) unblocked. Thread completion reports back to the UI thread via custom Windows messages (`WM_APP_SCAN_COMPLETE`).
-- **Configuration Persistence & Migration**: Settings are persisted at `%APPDATA%\HearThis\config.txt` with automatic legacy migration from `%APPDATA%\SongDetector\native_config.txt`.
+- **Native Win32 Controls**: Built with raw `CreateWindowExA`, standard Win32 edit boxes, buttons, drop-down combo boxes, and custom owner-drawn controls with `Segoe UI` typography.
+- **Dynamic Dual-Theme Engine (Dark & Light Modes)**:
+  - Supports both dark mode (`RGB(20, 21, 25)`) and a clean high-contrast light mode (`RGB(245, 246, 248)` background with crisp `#FFFFFF` cards and `#111827` primary text).
+  - GDI brush and pen resources (`g_bg_brush`, `g_card_brush`, `g_input_brush`, `g_border_pen`, `g_border_subtle_pen`) dynamically regenerate upon theme toggles via `update_theme_resources()`.
+  - Integrates with Windows Desktop Window Manager (`dwmapi.dll`), calling `DwmSetWindowAttribute(hwnd, DWMWA_USE_IMMERSIVE_DARK_MODE, ...)` dynamically to toggle the native OS title bar between dark and light styles.
+  - Complete redraws are triggered with `RedrawWindow` (`RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN | RDW_UPDATENOW`) and flickering is eliminated by intercepting `WM_ERASEBKGND` to paint directly with `g_bg_brush`.
+- **Desktop Window Manager (`dwmapi.dll`)**: Dynamically synchronizes native title bars with the current application theme.
+- **Asynchronous Execution**: UI events trigger background worker threads (`std::thread`), leaving the message pump (`GetMessage`/`DispatchMessage`) unblocked. Thread completion reports back to the UI thread via custom Windows messages (`WM_RECOGNITION_DONE`).
+- **Configuration Persistence & Migration**: Settings are persisted at `%APPDATA%\HearThis\config.txt` (including `theme=dark` or `theme=light`) with automatic legacy migration from `%APPDATA%\SongDetector\native_config.txt`.

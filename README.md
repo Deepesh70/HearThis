@@ -62,6 +62,7 @@ flowchart TD
 ## ✨ Engineering Highlights
 
 - **Dual-Source Audio Recognition**: Easily toggle between internal system loopback (Speakers) and live acoustic capture (Microphone).
+- **Dynamic Light & Dark Themes**: Includes a native Light Theme and Immersive Dark Mode with one-click instant toggling in the header and persistent preference storage.
 - **Acoustic Conditioning**: Custom 1st-order 80 Hz IIR high-pass filter eliminates room rumble and DC bias, while bounded peak normalization boosts quiet room music without amplifying background noise.
 - **Ultra-Small Binary**: The standalone executable is only **~350 KB**, requiring zero Python, Qt, or external runtime installations.
 - **Zero Third-Party Dependencies**: Built entirely using native Windows system DLLs:
