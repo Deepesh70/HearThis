@@ -1,5 +1,9 @@
 # HearThis 🎵
 
+<p align="center">
+  <img src="assets/banner.png" alt="HearThis Showcase Banner" width="100%">
+</p>
+
 [![C++17](https://img.shields.io/badge/C%2B%2B-17-blue.svg)](https://en.wikipedia.org/wiki/C%2B%2B17)
 [![Platform: Windows](https://img.shields.io/badge/platform-Windows%2010%2F11-0078D6.svg)]()
 [![Binary Size](https://img.shields.io/badge/executable-350%20KB-brightgreen.svg)]()
