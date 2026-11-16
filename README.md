@@ -1,132 +1,174 @@
-# HearThis 🎵
+# HearThis
 
 <p align="center">
-  <img src="assets/banner.png" alt="HearThis Showcase Banner" width="100%">
+  <img src="assets/banner.png" alt="HearThis Banner" width="100%">
 </p>
 
 [![C++17](https://img.shields.io/badge/C%2B%2B-17-blue.svg)](https://en.wikipedia.org/wiki/C%2B%2B17)
 [![Platform: Windows](https://img.shields.io/badge/platform-Windows%2010%2F11-0078D6.svg)]()
-[![Binary Size](https://img.shields.io/badge/executable-350%20KB-brightgreen.svg)]()
+[![Binary Size](https://img.shields.io/badge/size-350%20KB-brightgreen.svg)]()
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-[![CI Status](https://img.shields.io/badge/tests-passing-brightgreen.svg)]()
+[![Tests](https://img.shields.io/badge/tests-passing-brightgreen.svg)]()
 
-HearThis is a lightweight, high-performance native Windows desktop audio recognition application written in modern C++17.
+HearThis is a fast music recognition app for Windows. It identifies songs playing on your computer or in the room around you.
 
-HearThis identifies music playing on your PC or in the room around you:
-1. **Internal Desktop Audio (Speakers)**: Uses **WASAPI loopback** to capture playback directly from Spotify, YouTube, games, and web browsers without microphone bleed.
-2. **Live Room Music (Microphone)**: Captures audio from external sound sources (smartphones, radio, TV, room speakers) with real-time acoustic signal conditioning (80 Hz rumble removal and bounded peak normalization).
-
-Identifications query direct cloud API providers (**ACRCloud** and **AudD**) with sub-second response times, zero third-party dependencies, and zero background telemetry.
+The app is completely native. It uses less than 400 KB of disk space and needs no extra runtimes like Python or web views.
 
 ---
 
-## 💾 Download for Windows
+## Why HearThis?
 
-Get the latest release directly from **[GitHub Releases](https://github.com/deepesh70/song-detector/releases/latest)**:
+Most music apps only listen to your microphone. Others run slow web wrappers that use hundreds of megabytes of RAM.
 
-- **Installer**: `HearThis-Setup-v2.0.0.exe` — Ultra-light Windows setup wizard with Desktop shortcuts and Start Menu entry.
-- **Portable**: `HearThis-v2.0.0-portable.zip` — Standalone portable build (~367 KB). Extract and double-click `HearThis.exe` without installation.
+HearThis solves these problems:
+
+- **Listen to PC Audio**: Capture music directly from your speakers, browser, or games without any room noise.
+- **Listen to Room Audio**: Capture songs from your phone, TV, or radio using your laptop or USB microphone.
+- **Fast and Accurate**: Identifies tracks in seconds using ACRCloud and AudD music databases.
+- **Light and Dark Themes**: Switch themes with one click. Your choice saves automatically.
+- **Privacy First**: No tracking, no background services, and zero telemetry. It only sends audio when you click the scan button.
+
+> [!TIP]
+> Use the **Speakers** mode when you want clean audio from a YouTube video or stream. Use the **Mic** mode when you want to name a song playing in the room.
 
 ---
 
-## 🏛 Architecture Overview
+## Download and Quick Start
+
+You do not need to install complex tools to run HearThis.
+
+### 1. Download
+
+Get the latest build from the **[Releases Page](https://github.com/deepesh70/song-detector/releases/latest)**:
+
+- **Portable Zip**: Download `HearThis-v2.1.0-portable.zip`. Extract the folder and double-click `HearThis.exe`.
+- **Installer**: Download `HearThis-Setup-v2.1.0.exe` for a standard Windows install wizard.
+
+### 2. Add Your Free API Keys
+
+HearThis needs an API key to identify music. Both supported services offer free plans:
+
+1. Click **Get ACRCloud Keys** in the app to open the free ACRCloud signup page.
+2. Create a free project and copy your **Host**, **Access Key**, and **Access Secret**.
+3. Paste the keys into HearThis. The app saves them automatically for future sessions.
+
+> [!NOTE]
+> You can also select **AudD** as your provider if you prefer AudD tokens.
+
+### 3. Identify Music
+
+1. Start your music.
+2. Select your audio source (**Speakers** or **Mic**).
+3. Select your scan length (**5 Seconds** or **10 Seconds**).
+4. Click **Identify Music Now**.
+5. When the scan finishes, click **YouTube** or **Search Web** to open the track.
+
+---
+
+## Configuration
+
+HearThis saves your settings in a simple text file:
+
+```text
+%APPDATA%\HearThis\config.txt
+```
+
+The file stores your choices:
+- `theme`: Your selected theme (`dark` or `light`).
+- `provider`: Your chosen service (`acrcloud` or `audd`).
+- `source`: Your default input (`speakers` or `mic`).
+- `duration`: Scan length in seconds (`5` or `10`).
+- API credentials for each service.
+
+If you ever want to reset the app, simply delete this file.
+
+---
+
+## How It Works
 
 ```mermaid
 flowchart TD
-    subgraph CaptureEngine ["WASAPI Dual-Source Engine"]
-        A1["Internal Desktop Audio (Speakers)"] --> B1["WASAPI Loopback (eRender)"]
-        A2["Live Room Music (Microphone)"] --> B2["WASAPI Mic Capture (eCapture / eCommunications)"]
-        B1 --> C["Raw 48kHz Audio Packets"]
-        B2 --> C
-    end
+    A["Audio Source\n(Speakers or Mic)"] --> B["WASAPI Windows Capture"]
+    B --> C["Filter Audio\n(80 Hz High-Pass + Boost)"]
+    C --> D{"Sound Detected?"}
+    D -->|"No (Silence)"| E["Stop Scan Early"]
+    D -->|"Yes (Music)"| F["Build WAV Data in Memory"]
+    F --> G["Send Secure HTTPS Request"]
+    G --> H["Show Song Title & Links"]
+```
 
-    subgraph Conditioning ["Acoustic Conditioning & DSP"]
-        C --> D["Channel-Aware Downmixing (to_mono)"]
-        D --> E{"Source?"}
-        E -->|"Microphone"| F["80 Hz IIR High-Pass Filter + Peak Normalization"]
-        E -->|"Speakers"| G["Pass Through"]
-        F --> H["RMS Energy Silence Gate (-50 dBFS)"]
-        G --> H
-        H -->|"Audio Active"| I["In-Memory 44-Byte RIFF WAV Serialization"]
-    end
+1. **Audio Capture**: Uses the native Windows Audio Session API (WASAPI) to record clear audio packets.
+2. **Signal Filter**: An 80 Hz high-pass filter cuts low room rumble when using a microphone. A peak filter balances quiet sounds.
+3. **Silence Gate**: If the room or PC is silent, the app stops early to save your monthly API requests.
+4. **Direct HTTPS**: The app signs requests using Windows security libraries (`bcrypt.dll` and `winhttp.dll`) and sends them directly to the provider.
 
-    subgraph Providers ["Direct Cloud Transport"]
-        I --> J{"Selected Provider"}
-        J -->|"ACRCloud (Default)"| K["Native BCrypt HMAC-SHA1 + WinHTTP -> /v1/identify"]
-        J -->|"AudD (Secondary)"| L["Multipart WinHTTP POST -> https://api.audd.io/"]
-        K --> M["JSON Song Metadata & Web Search"]
-        L --> M
-    end
+---
 
-    M --> N["Dark-Themed Win32 GUI Window (Segoe UI)"]
+## Project Structure
+
+```
+HearThis/
+├── CMakeLists.txt         # Build rules for CMake
+├── build.bat              # Quick build script for MSVC
+├── include/hearthis/      # C++ header files
+│   ├── audio_processor.h  # Audio filters and WAV builder
+│   ├── wasapi_capture.h   # Windows audio recording engine
+│   └── api_client.h       # HTTPS network and cloud API client
+├── src/                   # C++ source code
+│   ├── audio_processor.cpp# Filter math and downmixing logic
+│   ├── wasapi_capture.cpp # Windows COM WASAPI integration
+│   ├── api_client.cpp     # WinHTTP and cryptographic signing
+│   └── main.cpp           # Win32 user interface and theme engine
+├── tests/                 # Automated test suites
+├── assets/                # App icons and showcase banner
+└── installer/             # Inno Setup installer script
 ```
 
 ---
 
-## ✨ Engineering Highlights
+## Building from Source
 
-- **Dual-Source Audio Recognition**: Easily toggle between internal system loopback (Speakers) and live acoustic capture (Microphone).
-- **Dynamic Light & Dark Themes**: Includes a native Light Theme and Immersive Dark Mode with one-click instant toggling in the header and persistent preference storage.
-- **Acoustic Conditioning**: Custom 1st-order 80 Hz IIR high-pass filter eliminates room rumble and DC bias, while bounded peak normalization boosts quiet room music without amplifying background noise.
-- **Ultra-Small Binary**: The standalone executable is only **~350 KB**, requiring zero Python, Qt, or external runtime installations.
-- **Zero Third-Party Dependencies**: Built entirely using native Windows system DLLs:
-  - Audio capture: Windows Audio Session API (`WASAPI` / `IAudioCaptureClient` COM).
-  - Secure transport: Windows HTTP Services (`winhttp.dll`).
-  - Cryptography: Windows Cryptography Next Generation (`bcrypt.dll` for HMAC-SHA1 and `crypt32.dll` for Base64).
-  - User interface: Native Win32 Desktop Window Manager with immersive dark mode (`dwmapi.dll`).
-- **Cooperative Cancellation**: Instantly aborts long 10-second scans if the user closes the window or cancels, keeping the UI responsive.
-- **Automatic Configuration Persistence**: Remembers your audio source, provider, credentials, and scan duration across sessions in `%APPDATA%\HearThis\config.txt` (with seamless migration from legacy configs).
-
----
-
-## 📂 Repository Structure
-
-```
-song-detector/
-├── CMakeLists.txt                         # CMake build specification
-├── build.bat                              # One-click Visual Studio MSVC compilation runner
-├── include/                               # Public C++ header interfaces
-│   └── hearthis/
-│       ├── audio_processor.h              # Downmixing, HPF, normalization, and WAV builder
-│       ├── wasapi_capture.h               # WASAPI loopback and microphone capture
-│       └── api_client.h                   # ACRCloud & AudD WinHTTP client + HMAC-SHA1
-├── src/                                   # Implementation source files
-│   ├── audio_processor.cpp                # Signal processing algorithms
-│   ├── wasapi_capture.cpp                 # Windows COM audio engine integration
-│   ├── api_client.cpp                     # Native WinHTTP HTTPS transport & crypto
-│   └── main.cpp                           # Dark-mode Win32 GUI entrypoint
-├── tests/                                 # Automated C++ unit test suites
-│   ├── test_processor.cpp                 # Downmix, HPF, normalization, and WAV tests
-│   ├── test_capture.cpp                   # Dual-source WASAPI capture tests
-│   └── test_api_client.cpp                # Cryptography & JSON parser tests
-├── installer/                             # Inno Setup Windows installer script
-│   └── HearThis.iss
-└── assets/                                # Multi-resolution icons (.ico, .png)
-```
-
----
-
-## 🛠 Building from Source
+You can build HearThis on Windows 10 or Windows 11.
 
 ### Prerequisites
-- Windows 10 or 11 (64-bit)
-- Visual Studio 2022 (with "Desktop development with C++" workload) or Build Tools for Visual Studio.
 
-### Method 1: Using `build.bat` (Fastest)
-Open any terminal and run:
-```cmd
-build.bat
-```
-This compiles the unit tests, executes test suites, and outputs `HearThis.exe` in the root and `dist/` folders.
+- A 64-bit Windows computer.
+- A modern C++17 compiler (Visual Studio 2022 with C++ tools, or MinGW-w64).
+- CMake 3.16 or newer.
 
-### Method 2: Using CMake
+> [!IMPORTANT]
+> HearThis uses only native Windows system libraries (`winhttp`, `bcrypt`, `dwmapi`, `ole32`). You do not need to install any external C++ packages.
+
+### Method 1: Using CMake
+
 ```cmd
 cmake -B build
 cmake --build build --config Release
 ctest --test-dir build -C Release --output-on-failure
 ```
 
+### Method 2: Using the Build Script
+
+Run the automated build script in your terminal:
+
+```cmd
+build.bat
+```
+
+This script builds the test programs, runs all tests, and compiles the final `HearThis.exe` binary.
+
 ---
 
-## 📄 License
-HearThis is distributed under the [MIT License](LICENSE).
+## Contributing and Portability
+
+We welcome contributions and bug reports.
+
+- **Portability**: HearThis relies directly on Windows audio and windowing APIs (WASAPI, Win32, DWM, and WinHTTP). Because of this, it runs only on Windows.
+- **Reporting Issues**: If you encounter an audio error or device crash, please open a GitHub Issue and include your Windows version and audio device name.
+- **Pull Requests**: Keep pull requests focused on one change. Ensure all unit tests pass before submitting code.
+
+---
+
+## License
+
+HearThis is licensed under the [MIT License](LICENSE).
