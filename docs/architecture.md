@@ -89,4 +89,8 @@ Network communication and cryptographic signing are implemented strictly through
   - Complete redraws are triggered with `RedrawWindow` (`RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN | RDW_UPDATENOW`) and flickering is eliminated by intercepting `WM_ERASEBKGND` to paint directly with `g_bg_brush`.
 - **Desktop Window Manager (`dwmapi.dll`)**: Dynamically synchronizes native title bars with the current application theme.
 - **Asynchronous Execution**: UI events trigger background worker threads (`std::thread`), leaving the message pump (`GetMessage`/`DispatchMessage`) unblocked. Thread completion reports back to the UI thread via custom Windows messages (`WM_RECOGNITION_DONE`).
-- **Configuration Persistence & Migration**: Settings are persisted at `%APPDATA%\HearThis\config.txt` (including `theme=dark` or `theme=light`) with automatic legacy migration from `%APPDATA%\SongDetector\native_config.txt`.
+
+### 2.5 Configuration Engine & State Persistence (`settings.cpp`)
+- **Schema**: Encapsulates `AppSettings` (active provider, capture duration, input source, theme choice, and credentials).
+- **Persistence & Migration**: Reads and writes `%APPDATA%\HearThis\config.txt` with automatic fallback migration from legacy `%APPDATA%\SongDetector\native_config.txt`.
+- **Fault-Tolerant Parsing**: Resilient to missing or corrupted key-value entries with safe string-to-integer conversion guards.

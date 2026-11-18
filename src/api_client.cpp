@@ -91,9 +91,13 @@ std::string hmac_sha1_base64(const std::string& key, const std::string& message)
     return b64;
 }
 
-std::string extract_json_field(const std::string& json, const std::string& key) {
+std::string extract_json_field(const std::string& json, const std::string& key, size_t start_pos) {
+    if (start_pos >= json.length()) {
+        return "";
+    }
+
     std::string pattern = "\"" + key + "\":";
-    size_t pos = json.find(pattern);
+    size_t pos = json.find(pattern, start_pos);
     if (pos == std::string::npos) {
         return "";
     }
@@ -285,9 +289,22 @@ RecognitionResult ApiClient::recognize_acrcloud(
     }
 
     // Extract title, artist, album from metadata.music array
-    result.title = extract_json_field(response, "title");
-    result.artist = extract_json_field(response, "name"); // artist name
-    result.album = extract_json_field(response, "name");  // fallback to album name or track
+    size_t music_pos = response.find("\"music\":");
+    size_t search_base = (music_pos != std::string::npos) ? music_pos : 0;
+
+    result.title = extract_json_field(response, "title", search_base);
+
+    size_t artists_pos = response.find("\"artists\":", search_base);
+    if (artists_pos != std::string::npos) {
+        result.artist = extract_json_field(response, "name", artists_pos);
+    } else {
+        result.artist = extract_json_field(response, "name", search_base);
+    }
+
+    size_t album_pos = response.find("\"album\":", search_base);
+    if (album_pos != std::string::npos) {
+        result.album = extract_json_field(response, "name", album_pos);
+    }
 
     if (!result.title.empty()) {
         result.matched = true;

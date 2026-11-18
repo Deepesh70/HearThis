@@ -37,7 +37,7 @@ if %ERRORLEVEL% NEQ 0 (
     echo [ERROR] Failed to compile Windows resource file.
     exit /b 1
 )
-cl /nologo /O2 /EHsc /std:c++17 /I include src\audio_processor.cpp src\wasapi_capture.cpp src\api_client.cpp src\main.cpp app.res user32.lib gdi32.lib dwmapi.lib comctl32.lib shell32.lib ole32.lib oleaut32.lib winhttp.lib bcrypt.lib crypt32.lib /Fe:HearThis.exe /link /SUBSYSTEM:WINDOWS
+cl /nologo /O2 /EHsc /std:c++17 /I include src\audio_processor.cpp src\wasapi_capture.cpp src\api_client.cpp src\settings.cpp src\main.cpp app.res user32.lib gdi32.lib dwmapi.lib comctl32.lib shell32.lib ole32.lib oleaut32.lib winhttp.lib bcrypt.lib crypt32.lib /Fe:HearThis.exe /link /SUBSYSTEM:WINDOWS
 if %ERRORLEVEL% NEQ 0 (
     echo [ERROR] Failed to compile HearThis.exe
     exit /b 1

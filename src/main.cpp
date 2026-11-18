@@ -1,6 +1,7 @@
 #include "hearthis/audio_processor.h"
 #include "hearthis/wasapi_capture.h"
 #include "hearthis/api_client.h"
+#include "hearthis/settings.h"
 
 #ifndef NOMINMAX
 #define NOMINMAX
@@ -12,6 +13,7 @@
 #include <string>
 #include <vector>
 #include <thread>
+#include <mutex>
 #include <fstream>
 #include <sstream>
 #include <atomic>
@@ -146,6 +148,11 @@ std::string g_current_youtube_url = "";
 std::string g_current_track_string = "";
 std::atomic<bool> g_cancel_scan{false};
 
+// Worker thread synchronization & safe result delivery
+std::mutex g_result_mutex;
+hearthis::RecognitionResult g_last_result;
+std::thread g_worker_thread;
+
 // Animation & Collapsible Settings State
 bool g_settings_expanded = false;
 bool g_is_scanning = false;
@@ -154,12 +161,9 @@ int g_scan_target_seconds = 10;
 std::chrono::steady_clock::time_point g_scan_start_time;
 
 void update_theme_resources(bool is_dark) {
-    if (g_bg_brush) DeleteObject(g_bg_brush);
-    if (g_input_brush) DeleteObject(g_input_brush);
-    if (g_card_brush) DeleteObject(g_card_brush);
-    if (g_accent_brush) DeleteObject(g_accent_brush);
-    if (g_border_pen) DeleteObject(g_border_pen);
-    if (g_border_subtle_pen) DeleteObject(g_border_subtle_pen);
+    for (HGDIOBJ obj : std::initializer_list<HGDIOBJ>{(HGDIOBJ)g_bg_brush, (HGDIOBJ)g_input_brush, (HGDIOBJ)g_card_brush, (HGDIOBJ)g_accent_brush, (HGDIOBJ)g_border_pen, (HGDIOBJ)g_border_subtle_pen}) {
+        if (obj) DeleteObject(obj);
+    }
 
     if (is_dark) {
         g_bg_brush = CreateSolidBrush(RGB(20, 21, 25));
@@ -178,102 +182,11 @@ void update_theme_resources(bool is_dark) {
     }
 }
 
-// Configuration persistence paths
-std::string get_load_config_file_path() {
-    char* appdata = nullptr;
-    size_t len = 0;
-    if (_dupenv_s(&appdata, &len, "APPDATA") == 0 && appdata) {
-        std::string base(appdata);
-        free(appdata);
-
-        std::string new_path = base + "\\HearThis\\config.txt";
-        DWORD attr = GetFileAttributesA(new_path.c_str());
-        if (attr != INVALID_FILE_ATTRIBUTES) {
-            return new_path;
-        }
-
-        std::string legacy_path = base + "\\SongDetector\\native_config.txt";
-        DWORD legacy_attr = GetFileAttributesA(legacy_path.c_str());
-        if (legacy_attr != INVALID_FILE_ATTRIBUTES) {
-            return legacy_path;
-        }
-
-        std::string new_dir = base + "\\HearThis";
-        CreateDirectoryA(new_dir.c_str(), nullptr);
-        return new_path;
-    }
-    return "config.txt";
-}
-
-std::string get_save_config_file_path() {
-    char* appdata = nullptr;
-    size_t len = 0;
-    if (_dupenv_s(&appdata, &len, "APPDATA") == 0 && appdata) {
-        std::string dir = std::string(appdata) + "\\HearThis";
-        CreateDirectoryA(dir.c_str(), nullptr);
-        std::string path = dir + "\\config.txt";
-        free(appdata);
-        return path;
-    }
-    return "config.txt";
-}
-
-struct AppSettings {
-    int provider_index = 0; // 0 = ACRCloud, 1 = AudD
-    int duration_seconds = 10; // 5 or 10
-    hearthis::AudioSource audio_source = hearthis::AudioSource::Speakers;
-    bool dark_theme = true; // true = Dark, false = Light
-    std::string acr_host = "identify-eu-west-1.acrcloud.com";
-    std::string acr_key = "";
-    std::string acr_secret = "";
-    std::string audd_token = "";
-};
+using hearthis::AppSettings;
+using hearthis::load_settings;
+using hearthis::save_settings;
 
 AppSettings g_settings;
-
-AppSettings load_settings() {
-    AppSettings s;
-    std::ifstream file(get_load_config_file_path());
-    if (file.is_open()) {
-        std::string line;
-        while (std::getline(file, line)) {
-            size_t eq = line.find('=');
-            if (eq != std::string::npos) {
-                std::string k = line.substr(0, eq);
-                std::string v = line.substr(eq + 1);
-                if (k == "provider") s.provider_index = std::stoi(v);
-                else if (k == "duration") s.duration_seconds = std::stoi(v);
-                else if (k == "audio_source" || k == "source") {
-                    s.audio_source = (std::stoi(v) == 1) ? hearthis::AudioSource::Microphone : hearthis::AudioSource::Speakers;
-                }
-                else if (k == "theme") {
-                    s.dark_theme = (v != "light");
-                }
-                else if (k == "acr_host") s.acr_host = v;
-                else if (k == "acr_key") s.acr_key = v;
-                else if (k == "acr_secret") s.acr_secret = v;
-                else if (k == "audd_token") s.audd_token = v;
-            }
-        }
-        file.close();
-    }
-    return s;
-}
-
-void save_settings(const AppSettings& s) {
-    std::ofstream file(get_save_config_file_path());
-    if (file.is_open()) {
-        file << "provider=" << s.provider_index << "\n";
-        file << "duration=" << s.duration_seconds << "\n";
-        file << "audio_source=" << static_cast<int>(s.audio_source) << "\n";
-        file << "theme=" << (s.dark_theme ? "dark" : "light") << "\n";
-        file << "acr_host=" << s.acr_host << "\n";
-        file << "acr_key=" << s.acr_key << "\n";
-        file << "acr_secret=" << s.acr_secret << "\n";
-        file << "audd_token=" << s.audd_token << "\n";
-        file.close();
-    }
-}
 
 void copy_to_clipboard(HWND hwnd, const std::string& text) {
     if (text.empty()) return;
@@ -297,21 +210,14 @@ void update_provider_visibility(int provider_index) {
     int show_acr = (g_settings_expanded && is_acr) ? SW_SHOW : SW_HIDE;
     int show_audd = (g_settings_expanded && !is_acr) ? SW_SHOW : SW_HIDE;
 
-    ShowWindow(g_hwnd_lbl_acr_host, show_acr);
-    ShowWindow(g_hwnd_edit_acr_host, show_acr);
-    ShowWindow(g_hwnd_lbl_acr_key, show_acr);
-    ShowWindow(g_hwnd_edit_acr_key, show_acr);
-    ShowWindow(g_hwnd_lbl_acr_secret, show_acr);
-    ShowWindow(g_hwnd_edit_acr_secret, show_acr);
-
-    ShowWindow(g_hwnd_lbl_audd_token, show_audd);
-    ShowWindow(g_hwnd_edit_audd_token, show_audd);
-
-    if (is_acr) {
-        SetWindowTextA(g_hwnd_btn_get_creds, "Get ACRCloud Keys");
-    } else {
-        SetWindowTextA(g_hwnd_btn_get_creds, "Get AudD Token");
+    for (HWND h : {g_hwnd_lbl_acr_host, g_hwnd_edit_acr_host, g_hwnd_lbl_acr_key, g_hwnd_edit_acr_key, g_hwnd_lbl_acr_secret, g_hwnd_edit_acr_secret}) {
+        ShowWindow(h, show_acr);
     }
+    for (HWND h : {g_hwnd_lbl_audd_token, g_hwnd_edit_audd_token}) {
+        ShowWindow(h, show_audd);
+    }
+
+    SetWindowTextA(g_hwnd_btn_get_creds, is_acr ? "Get ACRCloud Keys" : "Get AudD Token");
 }
 
 void apply_layout(HWND hwnd) {
@@ -365,14 +271,22 @@ void apply_layout(HWND hwnd) {
 
 // Background recognition worker thread
 void run_recognition_worker(HWND hwnd, AppSettings settings) {
+    auto post_result = [hwnd](const hearthis::RecognitionResult& res) {
+        {
+            std::lock_guard<std::mutex> lock(g_result_mutex);
+            g_last_result = res;
+        }
+        PostMessage(hwnd, WM_RECOGNITION_DONE, 0, 0);
+    };
+
     hearthis::WasapiCapture capture;
     double duration = static_cast<double>(settings.duration_seconds);
     hearthis::CapturedAudio audio = capture.capture_audio(settings.audio_source, duration, &g_cancel_scan);
 
     if (!audio.success) {
-        auto* res = new hearthis::RecognitionResult();
-        res->error_message = audio.error_message;
-        PostMessage(hwnd, WM_RECOGNITION_DONE, 0, reinterpret_cast<LPARAM>(res));
+        hearthis::RecognitionResult res;
+        res.error_message = audio.error_message;
+        post_result(res);
         return;
     }
 
@@ -384,11 +298,11 @@ void run_recognition_worker(HWND hwnd, AppSettings settings) {
     );
 
     if (hearthis::is_silent(conditioned, -50.0f)) {
-        auto* res = new hearthis::RecognitionResult();
-        res->error_message = (settings.audio_source == hearthis::AudioSource::Microphone)
+        hearthis::RecognitionResult res;
+        res.error_message = (settings.audio_source == hearthis::AudioSource::Microphone)
             ? "Silence detected. Microphone input was below -50 dBFS."
             : "Silence detected. System playback was below -50 dBFS.";
-        PostMessage(hwnd, WM_RECOGNITION_DONE, 0, reinterpret_cast<LPARAM>(res));
+        post_result(res);
         return;
     }
 
@@ -406,8 +320,29 @@ void run_recognition_worker(HWND hwnd, AppSettings settings) {
         result = client.recognize_audd(wav, settings.audd_token);
     }
 
-    auto* res = new hearthis::RecognitionResult(result);
-    PostMessage(hwnd, WM_RECOGNITION_DONE, 0, reinterpret_cast<LPARAM>(res));
+    post_result(result);
+}
+
+// Reusable declarative rounded button renderer
+void draw_rounded_button(DRAWITEMSTRUCT* pDraw, COLORREF bg_col, COLORREF border_col, COLORREF text_col, HFONT font, int radius) {
+    HBRUSH btnBrush = CreateSolidBrush(bg_col);
+    HPEN btnPen = CreatePen(PS_SOLID, 1, border_col);
+    HGDIOBJ oldBrush = SelectObject(pDraw->hDC, btnBrush);
+    HGDIOBJ oldPen = SelectObject(pDraw->hDC, btnPen);
+    RoundRect(pDraw->hDC, pDraw->rcItem.left, pDraw->rcItem.top, pDraw->rcItem.right, pDraw->rcItem.bottom, radius, radius);
+
+    SetBkMode(pDraw->hDC, TRANSPARENT);
+    SetTextColor(pDraw->hDC, text_col);
+    SelectObject(pDraw->hDC, font);
+
+    char text[64] = {0};
+    GetWindowTextA(pDraw->hwndItem, text, sizeof(text));
+    DrawTextA(pDraw->hDC, text, -1, &pDraw->rcItem, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+
+    SelectObject(pDraw->hDC, oldBrush);
+    SelectObject(pDraw->hDC, oldPen);
+    DeleteObject(btnBrush);
+    DeleteObject(btnPen);
 }
 
 // Main Window Procedure
@@ -420,16 +355,15 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         g_status_color = get_status_color(AppStatusState::Ready, g_settings.dark_theme);
 
         // Modern ClearType Typography (Segoe UI)
-        g_font_title = CreateFontA(-19, 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE, ANSI_CHARSET, OUT_DEFAULT_PRECIS,
-                                  CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE, "Segoe UI");
-        g_font_song_title = CreateFontA(-16, 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE, ANSI_CHARSET, OUT_DEFAULT_PRECIS,
-                                       CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE, "Segoe UI");
-        g_font_bold = CreateFontA(-13, 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE, ANSI_CHARSET, OUT_DEFAULT_PRECIS,
-                                 CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE, "Segoe UI");
-        g_font_regular = CreateFontA(-13, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, ANSI_CHARSET, OUT_DEFAULT_PRECIS,
-                                    CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE, "Segoe UI");
-        g_font_small = CreateFontA(-11, 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE, ANSI_CHARSET, OUT_DEFAULT_PRECIS,
-                                  CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE, "Segoe UI");
+        auto make_font = [](int size, int weight) {
+            return CreateFontA(size, 0, 0, 0, weight, FALSE, FALSE, FALSE, ANSI_CHARSET, OUT_DEFAULT_PRECIS,
+                               CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE, "Segoe UI");
+        };
+        g_font_title = make_font(-19, FW_BOLD);
+        g_font_song_title = make_font(-16, FW_BOLD);
+        g_font_bold = make_font(-13, FW_SEMIBOLD);
+        g_font_regular = make_font(-13, FW_NORMAL);
+        g_font_small = make_font(-11, FW_SEMIBOLD);
 
         // Header Title & Logo Icon
         HICON hLogo = reinterpret_cast<HICON>(GetClassLongPtrA(hwnd, GCLP_HICON));
@@ -451,118 +385,63 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             SendMessage(g_hwnd_subtitle, WM_SETFONT, reinterpret_cast<WPARAM>(g_font_regular), TRUE);
         }
 
+        auto make_ctrl = [&](const char* cls, const char* txt, DWORD style, int x, int y, int w, int h, int id, HFONT font) {
+            HWND hCtrl = CreateWindowA(cls, txt, style | WS_CHILD, x, y, w, h, hwnd,
+                                      id ? reinterpret_cast<HMENU>(static_cast<INT_PTR>(id)) : nullptr, nullptr, nullptr);
+            if (font) SendMessage(hCtrl, WM_SETFONT, reinterpret_cast<WPARAM>(font), TRUE);
+            return hCtrl;
+        };
+
         // Header Theme & Settings Buttons
-        g_hwnd_btn_theme = CreateWindowA("BUTTON", g_settings.dark_theme ? "Light" : "Dark", WS_VISIBLE | WS_CHILD | BS_OWNERDRAW,
-                                         314, 18, 62, 26, hwnd, reinterpret_cast<HMENU>(IDC_BTN_THEME), nullptr, nullptr);
-        SendMessage(g_hwnd_btn_theme, WM_SETFONT, reinterpret_cast<WPARAM>(g_font_regular), TRUE);
+        g_hwnd_btn_theme = make_ctrl("BUTTON", g_settings.dark_theme ? "Light" : "Dark", WS_VISIBLE | BS_OWNERDRAW, 314, 18, 62, 26, IDC_BTN_THEME, g_font_regular);
+        g_hwnd_btn_settings = make_ctrl("BUTTON", "Settings", WS_VISIBLE | BS_OWNERDRAW, 382, 18, 86, 26, IDC_BTN_SETTINGS, g_font_regular);
 
-        g_hwnd_btn_settings = CreateWindowA("BUTTON", "Settings", WS_VISIBLE | WS_CHILD | BS_OWNERDRAW,
-                                            382, 18, 86, 26, hwnd, reinterpret_cast<HMENU>(IDC_BTN_SETTINGS), nullptr, nullptr);
-        SendMessage(g_hwnd_btn_settings, WM_SETFONT, reinterpret_cast<WPARAM>(g_font_regular), TRUE);
-
-        // --- Collapsible Settings Section ---
-        g_hwnd_lbl_provider = CreateWindowA("STATIC", "Music Provider:", WS_CHILD, 28, 66, 120, 16, hwnd, nullptr, nullptr, nullptr);
-        SendMessage(g_hwnd_lbl_provider, WM_SETFONT, reinterpret_cast<WPARAM>(g_font_bold), TRUE);
-
-        g_hwnd_provider = CreateWindowA("COMBOBOX", "", WS_CHILD | CBS_DROPDOWNLIST | WS_VSCROLL,
-                                       28, 86, 270, 120, hwnd, reinterpret_cast<HMENU>(IDC_COMBO_PROVIDER), nullptr, nullptr);
-        SendMessage(g_hwnd_provider, WM_SETFONT, reinterpret_cast<WPARAM>(g_font_regular), TRUE);
+        // Collapsible Settings Section
+        g_hwnd_lbl_provider = make_ctrl("STATIC", "Music Provider:", 0, 28, 66, 120, 16, 0, g_font_bold);
+        g_hwnd_provider = make_ctrl("COMBOBOX", "", CBS_DROPDOWNLIST | WS_VSCROLL, 28, 86, 270, 120, IDC_COMBO_PROVIDER, g_font_regular);
         SendMessage(g_hwnd_provider, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>("ACRCloud (Default)"));
         SendMessage(g_hwnd_provider, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>("AudD (Secondary)"));
 
-        g_hwnd_btn_get_creds = CreateWindowA("BUTTON", "Get ACRCloud Keys", WS_CHILD | BS_OWNERDRAW,
-                                             308, 85, 160, 26, hwnd, reinterpret_cast<HMENU>(IDC_BTN_GET_CREDS), nullptr, nullptr);
-        SendMessage(g_hwnd_btn_get_creds, WM_SETFONT, reinterpret_cast<WPARAM>(g_font_regular), TRUE);
+        g_hwnd_btn_get_creds = make_ctrl("BUTTON", "Get ACRCloud Keys", BS_OWNERDRAW, 308, 85, 160, 26, IDC_BTN_GET_CREDS, g_font_regular);
 
         // ACRCloud Inputs
-        g_hwnd_lbl_acr_host = CreateWindowA("STATIC", "ACRCloud Host:", WS_CHILD, 28, 118, 140, 16, hwnd, nullptr, nullptr, nullptr);
-        SendMessage(g_hwnd_lbl_acr_host, WM_SETFONT, reinterpret_cast<WPARAM>(g_font_regular), TRUE);
+        g_hwnd_lbl_acr_host = make_ctrl("STATIC", "ACRCloud Host:", 0, 28, 118, 140, 16, 0, g_font_regular);
+        g_hwnd_edit_acr_host = make_ctrl("EDIT", "", ES_AUTOHSCROLL, 28, 137, 440, 23, IDC_EDIT_ACR_HOST, g_font_regular);
 
-        g_hwnd_edit_acr_host = CreateWindowA("EDIT", "", WS_CHILD | ES_AUTOHSCROLL,
-                                             28, 137, 440, 23, hwnd, reinterpret_cast<HMENU>(IDC_EDIT_ACR_HOST), nullptr, nullptr);
-        SendMessage(g_hwnd_edit_acr_host, WM_SETFONT, reinterpret_cast<WPARAM>(g_font_regular), TRUE);
+        g_hwnd_lbl_acr_key = make_ctrl("STATIC", "ACRCloud Access Key:", 0, 28, 167, 160, 16, 0, g_font_regular);
+        g_hwnd_edit_acr_key = make_ctrl("EDIT", "", ES_AUTOHSCROLL, 28, 186, 440, 23, IDC_EDIT_ACR_KEY, g_font_regular);
 
-        g_hwnd_lbl_acr_key = CreateWindowA("STATIC", "ACRCloud Access Key:", WS_CHILD, 28, 167, 160, 16, hwnd, nullptr, nullptr, nullptr);
-        SendMessage(g_hwnd_lbl_acr_key, WM_SETFONT, reinterpret_cast<WPARAM>(g_font_regular), TRUE);
-
-        g_hwnd_edit_acr_key = CreateWindowA("EDIT", "", WS_CHILD | ES_AUTOHSCROLL,
-                                            28, 186, 440, 23, hwnd, reinterpret_cast<HMENU>(IDC_EDIT_ACR_KEY), nullptr, nullptr);
-        SendMessage(g_hwnd_edit_acr_key, WM_SETFONT, reinterpret_cast<WPARAM>(g_font_regular), TRUE);
-
-        // ACRCloud Access Secret
-        g_hwnd_lbl_acr_secret = CreateWindowA("STATIC", "ACRCloud Access Secret:", WS_CHILD, 28, 216, 180, 16, hwnd, nullptr, nullptr, nullptr);
-        SendMessage(g_hwnd_lbl_acr_secret, WM_SETFONT, reinterpret_cast<WPARAM>(g_font_regular), TRUE);
-
-        g_hwnd_edit_acr_secret = CreateWindowA("EDIT", "", WS_CHILD | ES_AUTOHSCROLL | ES_PASSWORD,
-                                               28, 235, 440, 23, hwnd, reinterpret_cast<HMENU>(IDC_EDIT_ACR_SECRET), nullptr, nullptr);
-        SendMessage(g_hwnd_edit_acr_secret, WM_SETFONT, reinterpret_cast<WPARAM>(g_font_regular), TRUE);
+        g_hwnd_lbl_acr_secret = make_ctrl("STATIC", "ACRCloud Access Secret:", 0, 28, 216, 180, 16, 0, g_font_regular);
+        g_hwnd_edit_acr_secret = make_ctrl("EDIT", "", ES_AUTOHSCROLL | ES_PASSWORD, 28, 235, 440, 23, IDC_EDIT_ACR_SECRET, g_font_regular);
 
         // AudD Input
-        g_hwnd_lbl_audd_token = CreateWindowA("STATIC", "AudD API Token:", WS_CHILD, 28, 118, 140, 16, hwnd, nullptr, nullptr, nullptr);
-        SendMessage(g_hwnd_lbl_audd_token, WM_SETFONT, reinterpret_cast<WPARAM>(g_font_regular), TRUE);
+        g_hwnd_lbl_audd_token = make_ctrl("STATIC", "AudD API Token:", 0, 28, 118, 140, 16, 0, g_font_regular);
+        g_hwnd_edit_audd_token = make_ctrl("EDIT", "", ES_AUTOHSCROLL | ES_PASSWORD, 28, 137, 440, 23, IDC_EDIT_AUDD_TOKEN, g_font_regular);
 
-        g_hwnd_edit_audd_token = CreateWindowA("EDIT", "", WS_CHILD | ES_AUTOHSCROLL | ES_PASSWORD,
-                                               28, 137, 440, 23, hwnd, reinterpret_cast<HMENU>(IDC_EDIT_AUDD_TOKEN), nullptr, nullptr);
-        SendMessage(g_hwnd_edit_audd_token, WM_SETFONT, reinterpret_cast<WPARAM>(g_font_regular), TRUE);
+        // Symmetrical Segmented Pill Toggles
+        g_hwnd_lbl_src = make_ctrl("STATIC", "Audio Source:", WS_VISIBLE, 28, 74, 120, 16, 0, g_font_bold);
+        g_hwnd_btn_src_speakers = make_ctrl("BUTTON", "Speakers", WS_VISIBLE | BS_OWNERDRAW, 28, 94, 104, 28, IDC_TOGGLE_SRC_SPEAKERS, g_font_bold);
+        g_hwnd_btn_src_mic = make_ctrl("BUTTON", "Mic", WS_VISIBLE | BS_OWNERDRAW, 134, 94, 104, 28, IDC_TOGGLE_SRC_MIC, g_font_bold);
 
-        // --- Symmetrical Segmented Pill Toggles ---
-        g_hwnd_lbl_src = CreateWindowA("STATIC", "Audio Source:", WS_VISIBLE | WS_CHILD, 28, 74, 120, 16, hwnd, nullptr, nullptr, nullptr);
-        SendMessage(g_hwnd_lbl_src, WM_SETFONT, reinterpret_cast<WPARAM>(g_font_bold), TRUE);
-
-        g_hwnd_btn_src_speakers = CreateWindowA("BUTTON", "Speakers", WS_VISIBLE | WS_CHILD | BS_OWNERDRAW,
-                                                28, 94, 104, 28, hwnd, reinterpret_cast<HMENU>(IDC_TOGGLE_SRC_SPEAKERS), nullptr, nullptr);
-        SendMessage(g_hwnd_btn_src_speakers, WM_SETFONT, reinterpret_cast<WPARAM>(g_font_bold), TRUE);
-
-        g_hwnd_btn_src_mic = CreateWindowA("BUTTON", "Mic", WS_VISIBLE | WS_CHILD | BS_OWNERDRAW,
-                                           134, 94, 104, 28, hwnd, reinterpret_cast<HMENU>(IDC_TOGGLE_SRC_MIC), nullptr, nullptr);
-        SendMessage(g_hwnd_btn_src_mic, WM_SETFONT, reinterpret_cast<WPARAM>(g_font_bold), TRUE);
-
-        g_hwnd_lbl_dur = CreateWindowA("STATIC", "Scan Duration:", WS_VISIBLE | WS_CHILD, 258, 74, 120, 16, hwnd, nullptr, nullptr, nullptr);
-        SendMessage(g_hwnd_lbl_dur, WM_SETFONT, reinterpret_cast<WPARAM>(g_font_bold), TRUE);
-
-        g_hwnd_btn_dur_5s = CreateWindowA("BUTTON", "5 Seconds", WS_VISIBLE | WS_CHILD | BS_OWNERDRAW,
-                                          258, 94, 104, 28, hwnd, reinterpret_cast<HMENU>(IDC_TOGGLE_DUR_5S), nullptr, nullptr);
-        SendMessage(g_hwnd_btn_dur_5s, WM_SETFONT, reinterpret_cast<WPARAM>(g_font_bold), TRUE);
-
-        g_hwnd_btn_dur_10s = CreateWindowA("BUTTON", "10 Seconds", WS_VISIBLE | WS_CHILD | BS_OWNERDRAW,
-                                           364, 94, 104, 28, hwnd, reinterpret_cast<HMENU>(IDC_TOGGLE_DUR_10S), nullptr, nullptr);
-        SendMessage(g_hwnd_btn_dur_10s, WM_SETFONT, reinterpret_cast<WPARAM>(g_font_bold), TRUE);
+        g_hwnd_lbl_dur = make_ctrl("STATIC", "Scan Duration:", WS_VISIBLE, 258, 74, 120, 16, 0, g_font_bold);
+        g_hwnd_btn_dur_5s = make_ctrl("BUTTON", "5 Seconds", WS_VISIBLE | BS_OWNERDRAW, 258, 94, 104, 28, IDC_TOGGLE_DUR_5S, g_font_bold);
+        g_hwnd_btn_dur_10s = make_ctrl("BUTTON", "10 Seconds", WS_VISIBLE | BS_OWNERDRAW, 364, 94, 104, 28, IDC_TOGGLE_DUR_10S, g_font_bold);
 
         // Identify Button
-        g_hwnd_btn_identify = CreateWindowA("BUTTON", "Identify Music Now", WS_VISIBLE | WS_CHILD | BS_OWNERDRAW,
-                                            28, 134, 440, 38, hwnd, reinterpret_cast<HMENU>(IDC_BTN_IDENTIFY), nullptr, nullptr);
-        SendMessage(g_hwnd_btn_identify, WM_SETFONT, reinterpret_cast<WPARAM>(g_font_bold), TRUE);
+        g_hwnd_btn_identify = make_ctrl("BUTTON", "Identify Music Now", WS_VISIBLE | BS_OWNERDRAW, 28, 134, 440, 38, IDC_BTN_IDENTIFY, g_font_bold);
 
         // Status Label
-        g_hwnd_status = CreateWindowA("STATIC", "Ready. Click Identify Music Now to scan.",
-                                      WS_VISIBLE | WS_CHILD | SS_CENTER, 28, 180, 440, 18, hwnd, nullptr, nullptr, nullptr);
-        SendMessage(g_hwnd_status, WM_SETFONT, reinterpret_cast<WPARAM>(g_font_regular), TRUE);
+        g_hwnd_status = make_ctrl("STATIC", "Ready. Click Identify Music Now to scan.", WS_VISIBLE | SS_CENTER, 28, 180, 440, 18, 0, g_font_regular);
 
         // Result Card Elements
-        g_hwnd_card_badge = CreateWindowA("STATIC", "", WS_VISIBLE | WS_CHILD | SS_RIGHT,
-                                          350, 214, 104, 18, hwnd, nullptr, nullptr, nullptr);
-        SendMessage(g_hwnd_card_badge, WM_SETFONT, reinterpret_cast<WPARAM>(g_font_small), TRUE);
-
-        g_hwnd_song_title = CreateWindowA("STATIC", "No song identified yet", WS_VISIBLE | WS_CHILD | SS_LEFT,
-                                          44, 214, 300, 24, hwnd, nullptr, nullptr, nullptr);
-        SendMessage(g_hwnd_song_title, WM_SETFONT, reinterpret_cast<WPARAM>(g_font_song_title), TRUE);
-
-        g_hwnd_song_artist = CreateWindowA("STATIC", "Your detected track and links will appear here", WS_VISIBLE | WS_CHILD,
-                                           44, 240, 400, 18, hwnd, nullptr, nullptr, nullptr);
-        SendMessage(g_hwnd_song_artist, WM_SETFONT, reinterpret_cast<WPARAM>(g_font_regular), TRUE);
+        g_hwnd_card_badge = make_ctrl("STATIC", "", WS_VISIBLE | SS_RIGHT, 350, 214, 104, 18, 0, g_font_small);
+        g_hwnd_song_title = make_ctrl("STATIC", "No song identified yet", WS_VISIBLE | SS_LEFT, 44, 214, 300, 24, 0, g_font_song_title);
+        g_hwnd_song_artist = make_ctrl("STATIC", "Your detected track and links will appear here", WS_VISIBLE, 44, 240, 400, 18, 0, g_font_regular);
 
         // Action Row Buttons
-        g_hwnd_btn_browser = CreateWindowA("BUTTON", "Search Web", WS_VISIBLE | WS_CHILD | WS_DISABLED | BS_OWNERDRAW,
-                                           44, 270, 115, 26, hwnd, reinterpret_cast<HMENU>(IDC_BTN_BROWSER), nullptr, nullptr);
-        SendMessage(g_hwnd_btn_browser, WM_SETFONT, reinterpret_cast<WPARAM>(g_font_regular), TRUE);
-
-        g_hwnd_btn_youtube = CreateWindowA("BUTTON", "YouTube", WS_VISIBLE | WS_CHILD | WS_DISABLED | BS_OWNERDRAW,
-                                           167, 270, 105, 26, hwnd, reinterpret_cast<HMENU>(IDC_BTN_YOUTUBE), nullptr, nullptr);
-        SendMessage(g_hwnd_btn_youtube, WM_SETFONT, reinterpret_cast<WPARAM>(g_font_regular), TRUE);
-
-        g_hwnd_btn_copy = CreateWindowA("BUTTON", "Copy Title", WS_VISIBLE | WS_CHILD | WS_DISABLED | BS_OWNERDRAW,
-                                        280, 270, 95, 26, hwnd, reinterpret_cast<HMENU>(IDC_BTN_COPY), nullptr, nullptr);
-        SendMessage(g_hwnd_btn_copy, WM_SETFONT, reinterpret_cast<WPARAM>(g_font_regular), TRUE);
+        g_hwnd_btn_browser = make_ctrl("BUTTON", "Search Web", WS_VISIBLE | WS_DISABLED | BS_OWNERDRAW, 44, 270, 115, 26, IDC_BTN_BROWSER, g_font_regular);
+        g_hwnd_btn_youtube = make_ctrl("BUTTON", "YouTube", WS_VISIBLE | WS_DISABLED | BS_OWNERDRAW, 167, 270, 105, 26, IDC_BTN_YOUTUBE, g_font_regular);
+        g_hwnd_btn_copy = make_ctrl("BUTTON", "Copy Title", WS_VISIBLE | WS_DISABLED | BS_OWNERDRAW, 280, 270, 95, 26, IDC_BTN_COPY, g_font_regular);
 
         // Apply configuration controls
         SendMessage(g_hwnd_provider, CB_SETCURSEL, g_settings.provider_index, 0);
@@ -667,103 +546,52 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         auto* pDraw = reinterpret_cast<DRAWITEMSTRUCT*>(lParam);
         if (!pDraw) break;
 
-        // Erase any background behind the button to eliminate corner clipping artifacts
+        bool disabled = (pDraw->itemState & ODS_DISABLED);
+        bool selected = (pDraw->itemState & ODS_SELECTED);
+        bool is_dark = g_settings.dark_theme;
+
+        // Erase background behind button to eliminate corner clipping artifacts
         FillRect(pDraw->hDC, &pDraw->rcItem, g_bg_brush);
 
         if (pDraw->CtlID == IDC_BTN_IDENTIFY) {
-            bool disabled = (pDraw->itemState & ODS_DISABLED);
-            bool selected = (pDraw->itemState & ODS_SELECTED);
-            bool is_dark = g_settings.dark_theme;
-
-            HBRUSH btnBrush = disabled ? CreateSolidBrush(is_dark ? RGB(32, 34, 42) : RGB(226, 232, 240)) :
-                              selected ? CreateSolidBrush(RGB(13, 148, 100)) :
-                                         CreateSolidBrush(RGB(16, 185, 129));
-            HPEN btnPen = CreatePen(PS_SOLID, 1, disabled ? (is_dark ? RGB(42, 45, 53) : RGB(203, 213, 225)) :
-                                                            (selected ? RGB(13, 148, 100) : RGB(16, 185, 129)));
-
-            HGDIOBJ oldBrush = SelectObject(pDraw->hDC, btnBrush);
-            HGDIOBJ oldPen = SelectObject(pDraw->hDC, btnPen);
-            RoundRect(pDraw->hDC, pDraw->rcItem.left, pDraw->rcItem.top, pDraw->rcItem.right, pDraw->rcItem.bottom, 8, 8);
-
-            SetBkMode(pDraw->hDC, TRANSPARENT);
-            SetTextColor(pDraw->hDC, disabled ? (is_dark ? RGB(110, 115, 125) : RGB(148, 163, 184)) : RGB(255, 255, 255));
-            SelectObject(pDraw->hDC, g_font_bold);
-
-            char text[64] = {0};
-            GetWindowTextA(pDraw->hwndItem, text, sizeof(text));
-            DrawTextA(pDraw->hDC, text, -1, &pDraw->rcItem, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
-
-            SelectObject(pDraw->hDC, oldBrush);
-            SelectObject(pDraw->hDC, oldPen);
-            DeleteObject(btnBrush);
-            DeleteObject(btnPen);
+            COLORREF bg = disabled ? (is_dark ? RGB(32, 34, 42) : RGB(226, 232, 240)) :
+                          selected ? RGB(13, 148, 100) : RGB(16, 185, 129);
+            COLORREF border = disabled ? (is_dark ? RGB(42, 45, 53) : RGB(203, 213, 225)) :
+                              selected ? RGB(13, 148, 100) : RGB(16, 185, 129);
+            COLORREF text = disabled ? (is_dark ? RGB(110, 115, 125) : RGB(148, 163, 184)) : RGB(255, 255, 255);
+            draw_rounded_button(pDraw, bg, border, text, g_font_bold, 8);
             return TRUE;
-        } else if (pDraw->CtlID >= IDC_TOGGLE_SRC_SPEAKERS && pDraw->CtlID <= IDC_TOGGLE_DUR_10S) {
-            // Segmented pill toggles
-            bool is_active = false;
-            if (pDraw->CtlID == IDC_TOGGLE_SRC_SPEAKERS) is_active = (g_settings.audio_source == hearthis::AudioSource::Speakers);
-            else if (pDraw->CtlID == IDC_TOGGLE_SRC_MIC) is_active = (g_settings.audio_source == hearthis::AudioSource::Microphone);
-            else if (pDraw->CtlID == IDC_TOGGLE_DUR_5S) is_active = (g_settings.duration_seconds == 5);
-            else if (pDraw->CtlID == IDC_TOGGLE_DUR_10S) is_active = (g_settings.duration_seconds == 10);
+        }
 
-            bool is_dark = g_settings.dark_theme;
-            HBRUSH btnBrush = is_active ? (is_dark ? CreateSolidBrush(RGB(22, 54, 44)) : CreateSolidBrush(RGB(16, 185, 129))) :
-                                          (is_dark ? CreateSolidBrush(RGB(28, 30, 36)) : CreateSolidBrush(RGB(241, 245, 249)));
-            HPEN btnPen = CreatePen(PS_SOLID, 1, is_active ? RGB(16, 185, 129) :
-                                                            (is_dark ? RGB(42, 45, 53) : RGB(203, 213, 225)));
+        if (pDraw->CtlID >= IDC_TOGGLE_SRC_SPEAKERS && pDraw->CtlID <= IDC_TOGGLE_DUR_10S) {
+            bool is_active = (pDraw->CtlID == IDC_TOGGLE_SRC_SPEAKERS && g_settings.audio_source == hearthis::AudioSource::Speakers) ||
+                             (pDraw->CtlID == IDC_TOGGLE_SRC_MIC && g_settings.audio_source == hearthis::AudioSource::Microphone) ||
+                             (pDraw->CtlID == IDC_TOGGLE_DUR_5S && g_settings.duration_seconds == 5) ||
+                             (pDraw->CtlID == IDC_TOGGLE_DUR_10S && g_settings.duration_seconds == 10);
 
-            HGDIOBJ oldBrush = SelectObject(pDraw->hDC, btnBrush);
-            HGDIOBJ oldPen = SelectObject(pDraw->hDC, btnPen);
-            RoundRect(pDraw->hDC, pDraw->rcItem.left, pDraw->rcItem.top, pDraw->rcItem.right, pDraw->rcItem.bottom, 6, 6);
-
-            SetBkMode(pDraw->hDC, TRANSPARENT);
-            SetTextColor(pDraw->hDC, is_active ? (is_dark ? RGB(52, 211, 153) : RGB(255, 255, 255)) :
-                                                 (is_dark ? RGB(160, 165, 175) : RGB(71, 85, 105)));
-            SelectObject(pDraw->hDC, g_font_bold);
-
-            char text[64] = {0};
-            GetWindowTextA(pDraw->hwndItem, text, sizeof(text));
-            DrawTextA(pDraw->hDC, text, -1, &pDraw->rcItem, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
-
-            SelectObject(pDraw->hDC, oldBrush);
-            SelectObject(pDraw->hDC, oldPen);
-            DeleteObject(btnBrush);
-            DeleteObject(btnPen);
+            COLORREF bg = is_active ? (is_dark ? RGB(22, 54, 44) : RGB(16, 185, 129)) :
+                                      (is_dark ? RGB(28, 30, 36) : RGB(241, 245, 249));
+            COLORREF border = is_active ? RGB(16, 185, 129) : (is_dark ? RGB(42, 45, 53) : RGB(203, 213, 225));
+            COLORREF text = is_active ? (is_dark ? RGB(52, 211, 153) : RGB(255, 255, 255)) :
+                                        (is_dark ? RGB(160, 165, 175) : RGB(71, 85, 105));
+            draw_rounded_button(pDraw, bg, border, text, g_font_bold, 6);
             return TRUE;
-        } else if (pDraw->CtlID == IDC_BTN_SETTINGS || pDraw->CtlID == IDC_BTN_THEME || pDraw->CtlID == IDC_BTN_GET_CREDS ||
-                   pDraw->CtlID == IDC_BTN_BROWSER || pDraw->CtlID == IDC_BTN_YOUTUBE || pDraw->CtlID == IDC_BTN_COPY) {
-            bool disabled = (pDraw->itemState & ODS_DISABLED);
-            bool selected = (pDraw->itemState & ODS_SELECTED);
-            bool is_dark = g_settings.dark_theme;
+        }
 
-            // Card action buttons live inside the card, so clear with card brush
+        if (pDraw->CtlID == IDC_BTN_SETTINGS || pDraw->CtlID == IDC_BTN_THEME || pDraw->CtlID == IDC_BTN_GET_CREDS ||
+            pDraw->CtlID == IDC_BTN_BROWSER || pDraw->CtlID == IDC_BTN_YOUTUBE || pDraw->CtlID == IDC_BTN_COPY) {
             if (pDraw->CtlID == IDC_BTN_BROWSER || pDraw->CtlID == IDC_BTN_YOUTUBE || pDraw->CtlID == IDC_BTN_COPY) {
                 FillRect(pDraw->hDC, &pDraw->rcItem, g_card_brush);
             }
 
-            HBRUSH btnBrush = disabled ? CreateSolidBrush(is_dark ? RGB(28, 30, 36) : RGB(241, 245, 249)) :
-                              selected ? CreateSolidBrush(is_dark ? RGB(48, 52, 64) : RGB(218, 225, 233)) :
-                                         CreateSolidBrush(is_dark ? RGB(34, 37, 46) : RGB(241, 245, 249));
-            HPEN btnPen = CreatePen(PS_SOLID, 1, disabled ? (is_dark ? RGB(36, 38, 46) : RGB(226, 232, 240)) :
-                                                            (is_dark ? RGB(48, 52, 64) : RGB(203, 213, 225)));
-
-            HGDIOBJ oldBrush = SelectObject(pDraw->hDC, btnBrush);
-            HGDIOBJ oldPen = SelectObject(pDraw->hDC, btnPen);
-            RoundRect(pDraw->hDC, pDraw->rcItem.left, pDraw->rcItem.top, pDraw->rcItem.right, pDraw->rcItem.bottom, 6, 6);
-
-            SetBkMode(pDraw->hDC, TRANSPARENT);
-            SetTextColor(pDraw->hDC, disabled ? (is_dark ? RGB(90, 95, 105) : RGB(148, 163, 184)) :
-                                                (is_dark ? RGB(225, 228, 236) : RGB(17, 24, 39)));
-            SelectObject(pDraw->hDC, g_font_regular);
-
-            char text[64] = {0};
-            GetWindowTextA(pDraw->hwndItem, text, sizeof(text));
-            DrawTextA(pDraw->hDC, text, -1, &pDraw->rcItem, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
-
-            SelectObject(pDraw->hDC, oldBrush);
-            SelectObject(pDraw->hDC, oldPen);
-            DeleteObject(btnBrush);
-            DeleteObject(btnPen);
+            COLORREF bg = disabled ? (is_dark ? RGB(28, 30, 36) : RGB(241, 245, 249)) :
+                          selected ? (is_dark ? RGB(48, 52, 64) : RGB(218, 225, 233)) :
+                                     (is_dark ? RGB(34, 37, 46) : RGB(241, 245, 249));
+            COLORREF border = disabled ? (is_dark ? RGB(36, 38, 46) : RGB(226, 232, 240)) :
+                                         (is_dark ? RGB(48, 52, 64) : RGB(203, 213, 225));
+            COLORREF text = disabled ? (is_dark ? RGB(90, 95, 105) : RGB(148, 163, 184)) :
+                                       (is_dark ? RGB(225, 228, 236) : RGB(17, 24, 39));
+            draw_rounded_button(pDraw, bg, border, text, g_font_regular, 6);
             return TRUE;
         }
         break;
@@ -793,35 +621,27 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         COLORREF card_bg = is_dark ? RGB(26, 28, 34) : RGB(255, 255, 255);
         COLORREF main_bg = is_dark ? RGB(20, 21, 25) : RGB(245, 246, 248);
 
-        if (hCtrl == g_hwnd_song_title) {
-            SetTextColor(hdc, is_dark ? RGB(255, 255, 255) : RGB(17, 24, 39));
-            SetBkColor(hdc, card_bg);
-            return reinterpret_cast<LRESULT>(g_card_brush);
-        } else if (hCtrl == g_hwnd_song_artist) {
-            SetTextColor(hdc, is_dark ? RGB(156, 163, 175) : RGB(71, 85, 105));
-            SetBkColor(hdc, card_bg);
-            return reinterpret_cast<LRESULT>(g_card_brush);
-        } else if (hCtrl == g_hwnd_card_badge) {
-            SetTextColor(hdc, is_dark ? RGB(52, 211, 153) : RGB(5, 150, 105));
-            SetBkColor(hdc, card_bg);
-            return reinterpret_cast<LRESULT>(g_card_brush);
+        COLORREF text_col = is_dark ? RGB(215, 220, 230) : RGB(17, 24, 39);
+        COLORREF bg_col = main_bg;
+        HBRUSH brush = g_bg_brush;
+
+        if (hCtrl == g_hwnd_song_title || hCtrl == g_hwnd_song_artist || hCtrl == g_hwnd_card_badge) {
+            bg_col = card_bg;
+            brush = g_card_brush;
+            text_col = (hCtrl == g_hwnd_song_title) ? (is_dark ? RGB(255, 255, 255) : RGB(17, 24, 39)) :
+                       (hCtrl == g_hwnd_song_artist) ? (is_dark ? RGB(156, 163, 175) : RGB(71, 85, 105)) :
+                       (is_dark ? RGB(52, 211, 153) : RGB(5, 150, 105));
         } else if (hCtrl == g_hwnd_status) {
-            SetTextColor(hdc, g_status_color);
-            SetBkColor(hdc, main_bg);
-            return reinterpret_cast<LRESULT>(g_bg_brush);
+            text_col = g_status_color;
         } else if (hCtrl == g_hwnd_title) {
-            SetTextColor(hdc, is_dark ? RGB(255, 255, 255) : RGB(17, 24, 39));
-            SetBkColor(hdc, main_bg);
-            return reinterpret_cast<LRESULT>(g_bg_brush);
+            text_col = is_dark ? RGB(255, 255, 255) : RGB(17, 24, 39);
         } else if (hCtrl == g_hwnd_subtitle) {
-            SetTextColor(hdc, is_dark ? RGB(140, 145, 155) : RGB(71, 85, 105));
-            SetBkColor(hdc, main_bg);
-            return reinterpret_cast<LRESULT>(g_bg_brush);
+            text_col = is_dark ? RGB(140, 145, 155) : RGB(71, 85, 105);
         }
 
-        SetTextColor(hdc, is_dark ? RGB(215, 220, 230) : RGB(17, 24, 39));
-        SetBkColor(hdc, main_bg);
-        return reinterpret_cast<LRESULT>(g_bg_brush);
+        SetTextColor(hdc, text_col);
+        SetBkColor(hdc, bg_col);
+        return reinterpret_cast<LRESULT>(brush);
     }
 
     case WM_COMMAND: {
@@ -964,7 +784,10 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             SetWindowTextA(g_hwnd_song_artist, "Sampling acoustic fingerprint");
             SetWindowTextA(g_hwnd_card_badge, "");
 
-            std::thread(run_recognition_worker, hwnd, g_settings).detach();
+            if (g_worker_thread.joinable()) {
+                g_worker_thread.join();
+            }
+            g_worker_thread = std::thread(run_recognition_worker, hwnd, g_settings);
         }
         break;
     }
@@ -974,37 +797,46 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         g_is_scanning = false;
         g_scan_progress = 0.0f;
 
+        if (g_worker_thread.joinable()) {
+            g_worker_thread.join();
+        }
+
+        hearthis::RecognitionResult result;
+        {
+            std::lock_guard<std::mutex> lock(g_result_mutex);
+            result = g_last_result;
+        }
+
         // Force repaint of progress bar area
         int base_y = g_settings_expanded ? 280 : 74;
         int pbar_y = base_y + 98;
         RECT rcBar = { 28, pbar_y, 468, pbar_y + 4 };
         InvalidateRect(hwnd, &rcBar, TRUE);
 
-        auto* result = reinterpret_cast<hearthis::RecognitionResult*>(lParam);
         EnableWindow(g_hwnd_btn_identify, TRUE);
         InvalidateRect(g_hwnd_btn_identify, nullptr, TRUE);
 
-        if (!result->error_message.empty()) {
+        if (!result.error_message.empty()) {
             g_status_state = AppStatusState::Error;
             g_status_color = get_status_color(g_status_state, g_settings.dark_theme);
-            std::string err = "Notice: " + result->error_message;
+            std::string err = "Notice: " + result.error_message;
             SetWindowTextA(g_hwnd_status, err.c_str());
             SetWindowTextA(g_hwnd_song_title, "Scan Incomplete");
-            SetWindowTextA(g_hwnd_song_artist, result->error_message.c_str());
+            SetWindowTextA(g_hwnd_song_artist, result.error_message.c_str());
             SetWindowTextA(g_hwnd_card_badge, "");
-        } else if (result->matched) {
+        } else if (result.matched) {
             g_status_state = AppStatusState::Success;
             g_status_color = get_status_color(g_status_state, g_settings.dark_theme);
             SetWindowTextA(g_hwnd_status, "Track successfully identified!");
 
-            SetWindowTextA(g_hwnd_song_title, result->title.c_str());
-            SetWindowTextA(g_hwnd_song_artist, result->artist.c_str());
+            SetWindowTextA(g_hwnd_song_title, result.title.c_str());
+            SetWindowTextA(g_hwnd_song_artist, result.artist.c_str());
 
-            std::string badge_text = result->provider;
+            std::string badge_text = result.provider;
             SetWindowTextA(g_hwnd_card_badge, badge_text.c_str());
 
-            g_current_youtube_url = result->youtube_url;
-            g_current_track_string = result->title + " - " + result->artist;
+            g_current_youtube_url = result.youtube_url;
+            g_current_track_string = result.title + " - " + result.artist;
 
             EnableWindow(g_hwnd_btn_browser, TRUE);
             EnableWindow(g_hwnd_btn_youtube, TRUE);
@@ -1022,25 +854,19 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             SetWindowTextA(g_hwnd_card_badge, "");
         }
         InvalidateRect(g_hwnd_status, nullptr, TRUE);
-
-        delete result;
         break;
     }
 
     case WM_DESTROY: {
         g_cancel_scan = true;
+        if (g_worker_thread.joinable()) {
+            g_worker_thread.join();
+        }
         KillTimer(hwnd, TIMER_SCAN_PROGRESS);
-        if (g_bg_brush) { DeleteObject(g_bg_brush); g_bg_brush = nullptr; }
-        if (g_input_brush) { DeleteObject(g_input_brush); g_input_brush = nullptr; }
-        if (g_card_brush) { DeleteObject(g_card_brush); g_card_brush = nullptr; }
-        if (g_accent_brush) { DeleteObject(g_accent_brush); g_accent_brush = nullptr; }
-        if (g_border_pen) { DeleteObject(g_border_pen); g_border_pen = nullptr; }
-        if (g_border_subtle_pen) { DeleteObject(g_border_subtle_pen); g_border_subtle_pen = nullptr; }
-        if (g_font_title) DeleteObject(g_font_title);
-        if (g_font_song_title) DeleteObject(g_font_song_title);
-        if (g_font_bold) DeleteObject(g_font_bold);
-        if (g_font_regular) DeleteObject(g_font_regular);
-        if (g_font_small) DeleteObject(g_font_small);
+        for (HGDIOBJ obj : std::initializer_list<HGDIOBJ>{(HGDIOBJ)g_bg_brush, (HGDIOBJ)g_input_brush, (HGDIOBJ)g_card_brush, (HGDIOBJ)g_accent_brush, (HGDIOBJ)g_border_pen, (HGDIOBJ)g_border_subtle_pen,
+                            (HGDIOBJ)g_font_title, (HGDIOBJ)g_font_song_title, (HGDIOBJ)g_font_bold, (HGDIOBJ)g_font_regular, (HGDIOBJ)g_font_small}) {
+            if (obj) DeleteObject(obj);
+        }
         PostQuitMessage(0);
         break;
     }

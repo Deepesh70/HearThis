@@ -40,6 +40,22 @@ int main() {
     assert(hearthis::extract_json_field(fake_acr_json, "name") == "The Weeknd");
     std::cout << "  [PASS] ACRCloud JSON parsing verified." << std::endl;
 
+    // Test 3b: Scoped JSON extraction disambiguates duplicate "name" keys (artist vs album)
+    std::string multi_name_json = R"json({
+        "metadata": {
+            "music": [{
+                "title": "Starboy",
+                "artists": [{"name": "The Weeknd"}],
+                "album": {"name": "Starboy (Deluxe)"}
+            }]
+        }
+    })json";
+    size_t art_pos = multi_name_json.find("\"artists\":");
+    size_t alb_pos = multi_name_json.find("\"album\":");
+    assert(hearthis::extract_json_field(multi_name_json, "name", art_pos) == "The Weeknd");
+    assert(hearthis::extract_json_field(multi_name_json, "name", alb_pos) == "Starboy (Deluxe)");
+    std::cout << "  [PASS] Disambiguated duplicate 'name' keys via scoped search offset." << std::endl;
+
     // Test 4: WinHTTP Session Handle Lifecycle
     hearthis::ApiClient client;
     std::cout << "  [PASS] WinHTTP session handle initialized." << std::endl;

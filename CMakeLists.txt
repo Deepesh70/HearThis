@@ -11,6 +11,7 @@ add_library(hearthis_core STATIC
     src/audio_processor.cpp
     src/wasapi_capture.cpp
     src/api_client.cpp
+    src/settings.cpp
 )
 
 target_link_libraries(hearthis_core PUBLIC
@@ -46,3 +47,7 @@ add_test(NAME WasapiCaptureTest COMMAND test_capture)
 add_executable(test_api_client tests/test_api_client.cpp)
 target_link_libraries(test_api_client PRIVATE hearthis_core)
 add_test(NAME ApiClientTest COMMAND test_api_client)
+
+add_executable(test_settings tests/test_settings.cpp)
+target_link_libraries(test_settings PRIVATE hearthis_core)
+add_test(NAME SettingsTest COMMAND test_settings)

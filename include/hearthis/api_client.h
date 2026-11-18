@@ -54,8 +54,8 @@ private:
     void* session_handle_ = nullptr; // HINTERNET session
 };
 
-// Lightweight zero-dependency JSON string field extractor
-std::string extract_json_field(const std::string& json, const std::string& key);
+// Lightweight zero-dependency JSON string field extractor with optional start offset
+std::string extract_json_field(const std::string& json, const std::string& key, size_t start_pos = 0);
 
 // Native Windows BCrypt HMAC-SHA1 Base64 signer for ACRCloud authentication
 std::string hmac_sha1_base64(const std::string& key, const std::string& message);

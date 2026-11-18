@@ -29,16 +29,19 @@ song-detector/
 │   └── hearthis/
 │       ├── audio_processor.h  # Audio processing, filters, normalization, and WAV serialization
 │       ├── wasapi_capture.h   # Dual-source audio capture (Speakers loopback & Microphone)
-│       └── api_client.h       # Cloud API transport & BCrypt HMAC-SHA1
+│       ├── api_client.h       # Cloud API transport & BCrypt HMAC-SHA1
+│       └── settings.h         # App configuration schema & file persistence
 ├── src/                       # Source implementations
 │   ├── audio_processor.cpp    # Audio math algorithms & filters
 │   ├── wasapi_capture.cpp     # COM audio interface integration & cancellation
 │   ├── api_client.cpp         # WinHTTP HTTPS multipart client
+│   ├── settings.cpp           # Path discovery, file parsing, and migration
 │   └── main.cpp               # Win32 desktop application entrypoint
 ├── tests/                     # Automated C++ unit tests
 │   ├── test_processor.cpp     # Downmixing, HPF, normalization, and WAV format tests
 │   ├── test_capture.cpp       # Loopback & microphone hardware capture tests
-│   └── test_api_client.cpp    # HMAC-SHA1 test vector & JSON parser tests
+│   ├── test_api_client.cpp    # HMAC-SHA1 test vector & JSON parser tests
+│   └── test_settings.cpp      # Settings roundtrip, default values & legacy parser tests
 ├── installer/                 # Windows Inno Setup installer script
 │   └── HearThis.iss
 └── assets/                    # Application icons (.ico mipmaps, .png)

@@ -6,6 +6,11 @@
 #include <wrl/client.h>
 #include <chrono>
 #include <thread>
+#include <memory>
+
+// Standard GUID for IEEE Float PCM: {00000003-0000-0010-8000-00aa00389b71}
+static const GUID GUID_KSDATAFORMAT_SUBTYPE_IEEE_FLOAT =
+    { 0x00000003, 0x0000, 0x0010, { 0x80, 0x00, 0x00, 0xaa, 0x00, 0x38, 0x9b, 0x71 } };
 
 using Microsoft::WRL::ComPtr;
 
@@ -70,12 +75,19 @@ CapturedAudio WasapiCapture::capture_audio(AudioSource source, double duration_s
     }
 
     // 4. Query hardware mix format
-    WAVEFORMATEX* wave_format = nullptr;
-    hr = audio_client->GetMixFormat(&wave_format);
-    if (FAILED(hr) || !wave_format) {
+    WAVEFORMATEX* raw_wave_format = nullptr;
+    hr = audio_client->GetMixFormat(&raw_wave_format);
+    if (FAILED(hr) || !raw_wave_format) {
         result.error_message = "Failed to query system audio mix format.";
         return result;
     }
+
+    struct CoTaskMemDeleter {
+        void operator()(void* p) const noexcept {
+            if (p) CoTaskMemFree(p);
+        }
+    };
+    std::unique_ptr<WAVEFORMATEX, CoTaskMemDeleter> wave_format(raw_wave_format);
 
     result.sample_rate = wave_format->nSamplesPerSec;
     result.channels = wave_format->nChannels;
@@ -84,8 +96,8 @@ CapturedAudio WasapiCapture::capture_audio(AudioSource source, double duration_s
     if (wave_format->wFormatTag == WAVE_FORMAT_IEEE_FLOAT) {
         is_float = true;
     } else if (wave_format->wFormatTag == WAVE_FORMAT_EXTENSIBLE) {
-        auto* pEx = reinterpret_cast<WAVEFORMATEXTENSIBLE*>(wave_format);
-        if (pEx->SubFormat == KSDATAFORMAT_SUBTYPE_IEEE_FLOAT) {
+        auto* pEx = reinterpret_cast<WAVEFORMATEXTENSIBLE*>(wave_format.get());
+        if (pEx->SubFormat == GUID_KSDATAFORMAT_SUBTYPE_IEEE_FLOAT) {
             is_float = true;
         }
     }
@@ -100,7 +112,7 @@ CapturedAudio WasapiCapture::capture_audio(AudioSource source, double duration_s
         init_flags,
         buffer_duration,
         0,
-        wave_format,
+        wave_format.get(),
         nullptr
     );
 
@@ -111,13 +123,12 @@ CapturedAudio WasapiCapture::capture_audio(AudioSource source, double duration_s
             stream_flags,
             buffer_duration,
             0,
-            wave_format,
+            wave_format.get(),
             nullptr
         );
     }
 
     if (FAILED(hr)) {
-        CoTaskMemFree(wave_format);
         result.error_message = (source == AudioSource::Microphone)
             ? "Failed to initialize WASAPI microphone stream."
             : "Failed to initialize WASAPI loopback stream.";
@@ -132,7 +143,6 @@ CapturedAudio WasapiCapture::capture_audio(AudioSource source, double duration_s
     );
 
     if (FAILED(hr)) {
-        CoTaskMemFree(wave_format);
         result.error_message = "Failed to get IAudioCaptureClient service.";
         return result;
     }
@@ -140,7 +150,6 @@ CapturedAudio WasapiCapture::capture_audio(AudioSource source, double duration_s
     // 7. Start audio stream
     hr = audio_client->Start();
     if (FAILED(hr)) {
-        CoTaskMemFree(wave_format);
         result.error_message = "Failed to start audio stream.";
         return result;
     }
@@ -156,7 +165,6 @@ CapturedAudio WasapiCapture::capture_audio(AudioSource source, double duration_s
     while (result.samples.size() < total_samples_needed) {
         if (cancel_token && cancel_token->load()) {
             audio_client->Stop();
-            CoTaskMemFree(wave_format);
             result.error_message = "Capture cancelled by user.";
             result.success = false;
             return result;
@@ -219,7 +227,6 @@ CapturedAudio WasapiCapture::capture_audio(AudioSource source, double duration_s
     }
 
     audio_client->Stop();
-    CoTaskMemFree(wave_format);
 
     if (result.samples.size() < total_samples_needed) {
         result.samples.resize(total_samples_needed, 0.0f);
